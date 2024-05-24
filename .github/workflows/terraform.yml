@@ -1,0 +1,127 @@
+name: 'Local Terraform Infrastructure'
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  setup-vm:
+    name: 'Setup VM with Vagrant and VirtualBox'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install VirtualBox
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y virtualbox
+
+    - name: Install Vagrant
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y vagrant
+
+    - name: Create Vagrantfile
+      run: |
+        echo 'Vagrant.configure("2") do |config|
+          config.vm.define "example-vm" do |vm|
+            vm.vm.box = "ubuntu/bionic64"
+            vm.vm.network "private_network", type: "dhcp"
+            vm.vm.provider "virtualbox" do |vb|
+              vb.memory = "1024"
+              vb.cpus = 2
+            end
+            vm.vm.provision "shell", path: "provision.sh"
+          end
+        end' > Vagrantfile
+
+    - name: Create Provisioning Script
+      run: |
+        echo '#!/bin/bash
+        apt-get update
+        apt-get install -y docker.io git curl
+        usermod -aG docker vagrant
+        systemctl start docker
+        systemctl enable docker' > provision.sh
+        chmod +x provision.sh
+
+    - name: Setup and Start Vagrant VM
+      run: |
+        vagrant up
+
+  setup-docker:
+    name: 'Setup Docker Containers'
+    runs-on: ubuntu-latest
+    needs: setup-vm
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Create Dockerfile1 (Nginx)
+      run: |
+        mkdir -p docker/nginx
+        echo 'FROM ubuntu:20.04
+        RUN apt-get update && apt-get install -y nginx
+        CMD ["nginx", "-g", "daemon off;"]' > docker/nginx/Dockerfile
+
+    - name: Create Dockerfile2 (Redis)
+      run: |
+        mkdir -p docker/redis
+        echo 'FROM redis:latest' > docker/redis/Dockerfile
+
+    - name: Create Dockerfile3 (Flask App)
+      run: |
+        mkdir -p docker/app
+        echo 'FROM python:3.8-slim
+        WORKDIR /app
+        COPY . /app
+        RUN pip install flask
+        CMD ["python", "app.py"]' > docker/app/Dockerfile
+
+    - name: Create Flask Application (app.py)
+      run: |
+        echo 'from flask import Flask
+        app = Flask(__name__)
+        @app.route("/")
+        def hello_world():
+            return "Hello, World!"
+        if __name__ == "__main__":
+            app.run(host="0.0.0.0")' > docker/app/app.py
+
+    - name: Create Docker Compose File
+      run: |
+        echo 'version: "3"
+        services:
+          nginx:
+            build:
+              context: .
+              dockerfile: docker/nginx/Dockerfile
+            ports:
+              - "80:80"
+          redis:
+            build:
+              context: .
+              dockerfile: docker/redis/Dockerfile
+          app:
+            build:
+              context: .
+              dockerfile: docker/app/Dockerfile
+            ports:
+              - "5000:5000"
+            depends_on:
+              - redis' > docker-compose.yml
+
+    - name: Run Docker Compose
+      run: |
+        docker-compose up --build
+
+    - name: Verify Docker Containers
+      run: |
+        docker ps
